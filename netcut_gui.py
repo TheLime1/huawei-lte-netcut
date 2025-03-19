@@ -36,6 +36,7 @@ class NetcutGUI:
         self.wlan = None
         self.devices = []
         self.blocked_macs = set()
+        self.action_buttons = {}  # Store references to buttons
         
         # Configure style
         self.style = ttk.Style()
@@ -45,9 +46,8 @@ class NetcutGUI:
         self.style.configure("Badge.TLabel", font=("Helvetica", 10), background="#e0e0e0", padding=5, relief="solid", borderwidth=1)
         self.style.configure("BadgeEnabled.TLabel", background="#a8e6cf", foreground="#1b5e20", padding=5, relief="solid", borderwidth=1)
         self.style.configure("BadgeDisabled.TLabel", background="#f8d7da", foreground="#721c24", padding=5, relief="solid", borderwidth=1)
-        self.style.configure("Action.TButton", padding=2, font=("Helvetica", 8))
-        self.style.configure("Block.TButton", background="#f8d7da", foreground="#721c24")
-        self.style.configure("Unblock.TButton", background="#a8e6cf", foreground="#1b5e20")
+        self.style.configure("Block.TButton", padding=2, font=("Helvetica", 8))
+        self.style.configure("Unblock.TButton", padding=2, font=("Helvetica", 8))
         
         self.create_widgets()
         
@@ -65,7 +65,7 @@ class NetcutGUI:
         url_frame.grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
         
         ttk.Label(url_frame, text="Router URL:").pack(side=tk.LEFT, padx=(0, 5))
-        self.url_var = tk.StringVar()
+        self.url_var = tk.StringVar(value="http://192.168.8.1/")
         ttk.Entry(url_frame, textvariable=self.url_var, width=30).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(url_frame, text="Detect", command=self.detect_gateway, width=8).pack(side=tk.LEFT)
         
@@ -104,9 +104,13 @@ class NetcutGUI:
         devices_frame = ttk.LabelFrame(main_frame, text="Connected Devices", padding="10")
         devices_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        # Create treeview for devices
+        # Create frame to hold the treeview and buttons
+        tree_frame = ttk.Frame(devices_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create treeview for devices with updated column configuration
         columns = ("hostname", "mac", "ip", "status", "action")
-        self.tree = ttk.Treeview(devices_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         
         # Define headings
         self.tree.heading("hostname", text="Device Name")
@@ -123,7 +127,7 @@ class NetcutGUI:
         self.tree.column("action", width=80)
         
         # Add a scrollbar
-        scrollbar = ttk.Scrollbar(devices_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True)
@@ -293,9 +297,15 @@ class NetcutGUI:
             
             self.blocked_macs = blocked_macs
             
-            # Clear current tree
+            # Clear current tree and buttons
             for item in self.tree.get_children():
                 self.tree.delete(item)
+            
+            # Clear old button references
+            for button in self.action_buttons.values():
+                if button and button.winfo_exists():
+                    button.destroy()
+            self.action_buttons = {}
             
             # Fill tree with devices
             if 'Hosts' in host_list and 'Host' in host_list['Hosts']:
@@ -310,55 +320,75 @@ class NetcutGUI:
                     
                     status = "Blocked" if mac in blocked_macs else "Active"
                     
-                    # Insert item without the action button
-                    item_id = self.tree.insert('', tk.END, values=(hostname, mac, ip, status, ""))
+                    # Add a button text placeholder
+                    button_text = "Unblock" if status == "Blocked" else "Block"
                     
-                    # Create a frame for the button and add it to the treeview
-                    self.add_action_button(item_id, mac, status == "Blocked")
+                    # Insert item with the button text
+                    item_id = self.tree.insert('', tk.END, values=(hostname, mac, ip, status, button_text))
+                
+                # After adding all items, create buttons for visible rows
+                self.update_action_buttons()
+                
+                # Bind events that might change visibility to update buttons
+                self.tree.bind("<<TreeviewOpen>>", lambda e: self.update_action_buttons())
+                self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_action_buttons())
+                self.tree.bind("<Configure>", lambda e: self.update_action_buttons())
+                self.tree.bind("<ButtonRelease-1>", lambda e: self.update_action_buttons())
+                self.tree.bind("<MouseWheel>", lambda e: self.root.after(10, self.update_action_buttons))
+                self.tree.bind("<Up>", lambda e: self.root.after(10, self.update_action_buttons))
+                self.tree.bind("<Down>", lambda e: self.root.after(10, self.update_action_buttons))
             
             self.status_var.set(f"Found {len(self.tree.get_children())} devices")
             
         except Exception as e:
             self.status_var.set(f"Error refreshing devices: {str(e)}")
     
-    def add_action_button(self, item_id, mac, is_blocked):
-        """Add block/unblock button to a treeview item"""
-        # The frame needs to be recreated each time
-        frame = ttk.Frame(self.tree)
+    def update_action_buttons(self):
+        """Create/update all action buttons for visible rows"""
+        # First, hide all existing buttons
+        for button in self.action_buttons.values():
+            if button and button.winfo_exists():
+                button.place_forget()
         
-        # Create the appropriate button based on blocked status
-        if is_blocked:
-            btn = ttk.Button(frame, text="Unblock", width=10, 
-                         command=lambda m=mac: self.unblock_device(m),
-                         style="Action.TButton")
-        else:
-            btn = ttk.Button(frame, text="Block", width=10, 
-                         command=lambda m=mac: self.block_device(m),
-                         style="Action.TButton")
-        
-        btn.pack(padx=4, pady=2)
-        
-        # Use the frame to place the button in the treeview
-        self.tree.set(item_id, column="action", value="")
-        self.tree.item(item_id, tags=(item_id,))
-        
-        def on_item_visible(event):
+        # For each visible item, show or create a button
+        for item_id in self.tree.get_children():
+            # Check if this item is visible
             bbox = self.tree.bbox(item_id, column="action")
-            if bbox:  # If item is visible
-                frame.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+            if not bbox:
+                continue
+                
+            # Get item data
+            values = self.tree.item(item_id, 'values')
+            mac = values[1]
+            is_blocked = values[3] == "Blocked"
+            
+            # Create or update button
+            if item_id in self.action_buttons and self.action_buttons[item_id].winfo_exists():
+                button = self.action_buttons[item_id]
+                # Update button text and command if status changed
+                if is_blocked and button['text'] == "Block":
+                    button.config(text="Unblock", command=lambda m=mac: self.unblock_device(m))
+                elif not is_blocked and button['text'] == "Unblock":
+                    button.config(text="Block", command=lambda m=mac: self.block_device(m))
             else:
-                frame.place_forget()
-        
-        # Bind to events that might change visibility
-        self.tree.bind("<<TreeviewOpen>>", on_item_visible)
-        self.tree.bind("<<TreeviewSelect>>", on_item_visible)
-        self.tree.bind("<Configure>", on_item_visible)
-        self.tree.tag_bind(item_id, "<Visibility>", on_item_visible)
-        
-        # Initial placement
-        bbox = self.tree.bbox(item_id, column="action")
-        if bbox:
-            frame.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+                # Create new button
+                button_style = "Unblock.TButton" if is_blocked else "Block.TButton"
+                button_text = "Unblock" if is_blocked else "Block"
+                button_command = self.unblock_device if is_blocked else self.block_device
+                
+                button = ttk.Button(
+                    self.tree, 
+                    text=button_text,
+                    width=8,
+                    style=button_style,
+                    command=lambda m=mac, c=button_command: c(m)
+                )
+                self.action_buttons[item_id] = button
+            
+            # Position the button in the tree
+            x = bbox[0] + (bbox[2] - button.winfo_reqwidth()) // 2
+            y = bbox[1] + (bbox[3] - button.winfo_reqheight()) // 2
+            button.place(x=x, y=y)
     
     def block_device(self, mac):
         """Block a device by MAC address"""
