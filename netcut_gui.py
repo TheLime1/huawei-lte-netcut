@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-
-"""
-NetCut GUI for Huawei LTE routers.
-
-A graphical tool to view connected devices and block/unblock internet access
-by manipulating the router's MAC address filter.
-
-Usage:
-  python netcut_gui.py
-"""
-
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import threading
@@ -28,15 +16,17 @@ class NetcutGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Huawei LTE NetCut")
-        self.root.geometry("800x600")
-        self.root.minsize(800, 600)
+        self.root.geometry("900x700")
+        self.root.minsize(900, 700)
         
         self.connection = None
         self.client = None
         self.wlan = None
         self.devices = []
+        self.filtered_devices = []
         self.blocked_macs = set()
-        self.action_buttons = {}  # Store references to buttons
+        self.connected_action_buttons = {}  # Store references to block buttons
+        self.filtered_action_buttons = {}   # Store references to unblock buttons
         
         # Configure style
         self.style = ttk.Style()
@@ -100,16 +90,19 @@ class NetcutGUI:
                                            command=self.toggle_filter, state=tk.DISABLED)
         self.toggle_filter_btn.pack(side=tk.RIGHT, pady=5, padx=5)
         
-        # Devices frame
+        # Connected Devices frame
         devices_frame = ttk.LabelFrame(main_frame, text="Connected Devices", padding="10")
         devices_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        # Create frame to hold the treeview and buttons
-        tree_frame = ttk.Frame(devices_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Create a horizontal layout for treeview and buttons
+        connected_devices_container = ttk.Frame(devices_frame)
+        connected_devices_container.pack(fill=tk.BOTH, expand=True)
         
-        # Create treeview for devices with updated column configuration
-        columns = ("hostname", "mac", "ip", "status", "action")
+        # Create treeview for devices with updated column configuration (no action column)
+        tree_frame = ttk.Frame(connected_devices_container)
+        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        columns = ("hostname", "mac", "ip", "status")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         
         # Define headings
@@ -117,14 +110,12 @@ class NetcutGUI:
         self.tree.heading("mac", text="MAC Address")
         self.tree.heading("ip", text="IP Address")
         self.tree.heading("status", text="Status")
-        self.tree.heading("action", text="Action")
         
         # Define columns
         self.tree.column("hostname", width=150)
         self.tree.column("mac", width=150)
         self.tree.column("ip", width=120)
         self.tree.column("status", width=80)
-        self.tree.column("action", width=80)
         
         # Add a scrollbar
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -132,11 +123,50 @@ class NetcutGUI:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True)
         
+        # Add a frame for block buttons to the right of the treeview
+        self.block_buttons_frame = ttk.Frame(connected_devices_container, width=100)
+        self.block_buttons_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+        
+        # Filtered Devices frame
+        filtered_frame = ttk.LabelFrame(main_frame, text="Filtered/Blocked Devices", padding="10")
+        filtered_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Create a horizontal layout for filtered treeview and buttons
+        filtered_devices_container = ttk.Frame(filtered_frame)
+        filtered_devices_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Create treeview for filtered devices
+        filtered_tree_frame = ttk.Frame(filtered_devices_container)
+        filtered_tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        filtered_columns = ("hostname", "mac", "filter_type")
+        self.filtered_tree = ttk.Treeview(filtered_tree_frame, columns=filtered_columns, show="headings", selectmode="browse")
+        
+        # Define headings for filtered devices
+        self.filtered_tree.heading("hostname", text="Device Name")
+        self.filtered_tree.heading("mac", text="MAC Address")
+        self.filtered_tree.heading("filter_type", text="Filter Type")
+        
+        # Define columns for filtered devices
+        self.filtered_tree.column("hostname", width=150)
+        self.filtered_tree.column("mac", width=150)
+        self.filtered_tree.column("filter_type", width=100)
+        
+        # Add a scrollbar for filtered devices
+        filtered_scrollbar = ttk.Scrollbar(filtered_tree_frame, orient=tk.VERTICAL, command=self.filtered_tree.yview)
+        self.filtered_tree.configure(yscroll=filtered_scrollbar.set)
+        filtered_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.filtered_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Add a frame for unblock buttons to the right of the filtered treeview
+        self.unblock_buttons_frame = ttk.Frame(filtered_devices_container, width=100)
+        self.unblock_buttons_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+        
         # Action buttons
         action_frame = ttk.Frame(main_frame)
         action_frame.pack(fill=tk.X, pady=10)
         
-        self.refresh_btn = ttk.Button(action_frame, text="Refresh Devices", command=self.refresh_devices, state=tk.DISABLED)
+        self.refresh_btn = ttk.Button(action_frame, text="Refresh Devices", command=self.refresh_all, state=tk.DISABLED)
         self.refresh_btn.pack(side=tk.LEFT, padx=5)
         
         # Status bar
@@ -226,8 +256,7 @@ class NetcutGUI:
                 self.refresh_thread.start()
                 
                 self.status_var.set("Connected to " + url)
-                self.refresh_devices()
-                self.update_filter_status()
+                self.refresh_all()
                 
             except ResponseErrorException as e:
                 messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
@@ -251,10 +280,9 @@ class NetcutGUI:
             self.client = None
             self.wlan = None
             
-            # Clear devices
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-                
+            # Clear devices and buttons
+            self.clear_devices_ui()
+            
             # Update UI
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
@@ -264,22 +292,53 @@ class NetcutGUI:
             self.filter_status_label.config(text="Not connected", style="Badge.TLabel")
             self.status_var.set("Disconnected")
     
+    def clear_devices_ui(self):
+        """Clear all devices from UI and remove buttons"""
+        # Clear connected devices
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        # Clear filtered devices
+        for item in self.filtered_tree.get_children():
+            self.filtered_tree.delete(item)
+            
+        # Remove all block buttons
+        for button in self.connected_action_buttons.values():
+            if button and button.winfo_exists():
+                button.destroy()
+        self.connected_action_buttons = {}
+        
+        # Remove all unblock buttons
+        for button in self.filtered_action_buttons.values():
+            if button and button.winfo_exists():
+                button.destroy()
+        self.filtered_action_buttons = {}
+    
     def auto_refresh(self):
         while self.connection:
             time.sleep(30)  # Refresh every 30 seconds
             try:
                 if self.connection:
-                    self.root.after(0, self.refresh_devices)
-                    self.root.after(0, self.update_filter_status)
+                    self.root.after(0, self.refresh_all)
             except:
                 pass
     
-    def refresh_devices(self):
+    def refresh_all(self):
+        """Refresh both connected and filtered devices"""
+        if not self.connection:
+            return
+        
+        self.update_filter_status()
+        self.refresh_connected_devices()
+        self.refresh_filtered_devices()
+    
+    def refresh_connected_devices(self):
+        """Refresh the list of connected devices"""
         if not self.connection:
             return
             
         try:
-            self.status_var.set("Refreshing devices...")
+            self.status_var.set("Refreshing connected devices...")
             self.root.update_idletasks()
             
             # Get connected devices
@@ -302,10 +361,10 @@ class NetcutGUI:
                 self.tree.delete(item)
             
             # Clear old button references
-            for button in self.action_buttons.values():
+            for button in self.connected_action_buttons.values():
                 if button and button.winfo_exists():
                     button.destroy()
-            self.action_buttons = {}
+            self.connected_action_buttons = {}
             
             # Fill tree with devices
             if 'Hosts' in host_list and 'Host' in host_list['Hosts']:
@@ -318,89 +377,80 @@ class NetcutGUI:
                     hostname = host.get('HostName', 'Unknown')
                     ip = host.get('IpAddress', '')
                     
-                    status = "Blocked" if mac in blocked_macs else "Active"
+                    status = "Active"  # All devices here are active/connected
                     
-                    # Add a button text placeholder
-                    button_text = "Unblock" if status == "Blocked" else "Block"
+                    # Insert item without the action column
+                    item_id = self.tree.insert('', tk.END, values=(hostname, mac, ip, status))
                     
-                    # Insert item with the button text
-                    item_id = self.tree.insert('', tk.END, values=(hostname, mac, ip, status, button_text))
-                
-                # After adding all items, create buttons for visible rows
-                self.update_action_buttons()
-                
-                # Bind events that might change visibility to update buttons
-                self.tree.bind("<<TreeviewOpen>>", lambda e: self.update_action_buttons())
-                self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_action_buttons())
-                self.tree.bind("<Configure>", lambda e: self.update_action_buttons())
-                self.tree.bind("<ButtonRelease-1>", lambda e: self.update_action_buttons())
-                self.tree.bind("<MouseWheel>", lambda e: self.root.after(10, self.update_action_buttons))
-                self.tree.bind("<Up>", lambda e: self.root.after(10, self.update_action_buttons))
-                self.tree.bind("<Down>", lambda e: self.root.after(10, self.update_action_buttons))
+                    # Create block button for this device
+                    block_button = ttk.Button(
+                        self.block_buttons_frame,
+                        text="Block",
+                        width=10,
+                        style="Block.TButton",
+                        command=lambda m=mac, h=hostname: self.block_device(m, h)
+                    )
+                    block_button.pack(pady=2)
+                    self.connected_action_buttons[item_id] = block_button
             
-            self.status_var.set(f"Found {len(self.tree.get_children())} devices")
+            connected_count = len(self.tree.get_children())
+            self.status_var.set(f"Found {connected_count} connected devices")
             
         except Exception as e:
-            self.status_var.set(f"Error refreshing devices: {str(e)}")
+            self.status_var.set(f"Error refreshing connected devices: {str(e)}")
     
-    def update_action_buttons(self):
-        """Create/update all action buttons for visible rows"""
-        # First, hide all existing buttons
-        for button in self.action_buttons.values():
-            if button and button.winfo_exists():
-                button.place_forget()
-        
-        # For each visible item, show or create a button
-        for item_id in self.tree.get_children():
-            # Check if this item is visible
-            bbox = self.tree.bbox(item_id, column="action")
-            if not bbox:
-                continue
-                
-            # Get item data
-            values = self.tree.item(item_id, 'values')
-            mac = values[1]
-            is_blocked = values[3] == "Blocked"
+    def refresh_filtered_devices(self):
+        """Refresh the list of filtered/blocked devices"""
+        if not self.connection:
+            return
             
-            # Create or update button
-            if item_id in self.action_buttons and self.action_buttons[item_id].winfo_exists():
-                button = self.action_buttons[item_id]
-                # Update button text and command if status changed
-                if is_blocked and button['text'] == "Block":
-                    button.config(text="Unblock", command=lambda m=mac: self.unblock_device(m))
-                elif not is_blocked and button['text'] == "Unblock":
-                    button.config(text="Block", command=lambda m=mac: self.block_device(m))
-            else:
-                # Create new button
-                button_style = "Unblock.TButton" if is_blocked else "Block.TButton"
-                button_text = "Unblock" if is_blocked else "Block"
-                button_command = self.unblock_device if is_blocked else self.block_device
-                
-                button = ttk.Button(
-                    self.tree, 
-                    text=button_text,
-                    width=8,
-                    style=button_style,
-                    command=lambda m=mac, c=button_command: c(m)
-                )
-                self.action_buttons[item_id] = button
+        try:
+            self.status_var.set("Refreshing filtered devices...")
+            self.root.update_idletasks()
             
-            # Position the button in the tree
-            x = bbox[0] + (bbox[2] - button.winfo_reqwidth()) // 2
-            y = bbox[1] + (bbox[3] - button.winfo_reqheight()) // 2
-            button.place(x=x, y=y)
+            # Get filtered devices
+            filtered_devices = self.wlan.get_filtered_devices()
+            
+            # Clear current filtered tree and buttons
+            for item in self.filtered_tree.get_children():
+                self.filtered_tree.delete(item)
+            
+            # Clear old button references
+            for button in self.filtered_action_buttons.values():
+                if button and button.winfo_exists():
+                    button.destroy()
+            self.filtered_action_buttons = {}
+            
+            # Add all filtered devices to the filtered tree
+            for filter_info in filtered_devices:
+                filter_type = filter_info['filter_type']
+                for device in filter_info['devices']:
+                    mac = device['mac'].upper()
+                    hostname = device['hostname']
+                    
+                    # Insert item
+                    item_id = self.filtered_tree.insert('', tk.END, values=(hostname, mac, filter_type))
+                    
+                    # Create unblock button for this device
+                    unblock_button = ttk.Button(
+                        self.unblock_buttons_frame,
+                        text="Unblock",
+                        width=10,
+                        style="Unblock.TButton",
+                        command=lambda m=mac, h=hostname: self.unblock_device(m, h)
+                    )
+                    unblock_button.pack(pady=2)
+                    self.filtered_action_buttons[item_id] = unblock_button
+            
+            filtered_count = len(self.filtered_tree.get_children())
+            self.status_var.set(f"Found {filtered_count} filtered devices")
+            
+        except Exception as e:
+            self.status_var.set(f"Error refreshing filtered devices: {str(e)}")
     
-    def block_device(self, mac):
+    def block_device(self, mac, hostname):
         """Block a device by MAC address"""
         try:
-            # Find the hostname for this MAC
-            hostname = "Unknown"
-            for item_id in self.tree.get_children():
-                item_values = self.tree.item(item_id, 'values')
-                if item_values[1] == mac:
-                    hostname = item_values[0]
-                    break
-            
             self.status_var.set(f"Blocking {hostname}...")
             self.root.update_idletasks()
             
@@ -430,24 +480,16 @@ class NetcutGUI:
             )
             
             # Update UI
-            self.refresh_devices()
+            self.refresh_all()
             self.status_var.set(f"Blocked {hostname}")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to block device: {str(e)}")
             self.status_var.set("Block operation failed")
     
-    def unblock_device(self, mac):
+    def unblock_device(self, mac, hostname):
         """Unblock a device by MAC address"""
         try:
-            # Find the hostname for this MAC
-            hostname = "Unknown"
-            for item_id in self.tree.get_children():
-                item_values = self.tree.item(item_id, 'values')
-                if item_values[1] == mac:
-                    hostname = item_values[0]
-                    break
-            
             self.status_var.set(f"Unblocking {hostname}...")
             self.root.update_idletasks()
             
@@ -473,7 +515,7 @@ class NetcutGUI:
             )
             
             # Update UI
-            self.refresh_devices()
+            self.refresh_all()
             self.status_var.set(f"Unblocked {hostname}")
             
         except Exception as e:
@@ -539,9 +581,7 @@ class NetcutGUI:
                 }])
             
             # Update UI
-            self.update_filter_status()
-            self.refresh_devices()
-            
+            self.refresh_all()
             self.status_var.set(f"MAC filter {'enabled' if enabled else 'disabled'}")
             
         except Exception as e:
