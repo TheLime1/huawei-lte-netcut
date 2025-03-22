@@ -46,9 +46,13 @@ class NetcutGUI:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Connection frame
-        conn_frame = ttk.LabelFrame(main_frame, text="Router Connection", padding="10")
-        conn_frame.pack(fill=tk.X, pady=5)
+        # Create horizontal container for connection and filter frames
+        top_container = ttk.Frame(main_frame)
+        top_container.pack(fill=tk.X, pady=5)
+        
+        # Connection frame - now placed in the left side of top_container
+        conn_frame = ttk.LabelFrame(top_container, text="Router Connection", padding="10")
+        conn_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
         # URL row with detect button
         url_frame = ttk.Frame(conn_frame)
@@ -76,9 +80,9 @@ class NetcutGUI:
         self.disconnect_btn = ttk.Button(button_frame, text="Disconnect", command=self.disconnect, state=tk.DISABLED)
         self.disconnect_btn.pack(side=tk.LEFT, padx=5)
         
-        # Filter status frame with badge
-        self.filter_frame = ttk.LabelFrame(main_frame, text="MAC Filter Status", padding="10")
-        self.filter_frame.pack(fill=tk.X, pady=5)
+        # Filter status frame with badge - now placed in the right side of top_container
+        self.filter_frame = ttk.LabelFrame(top_container, text="MAC Filter Status", padding="10")
+        self.filter_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
         
         filter_status_frame = ttk.Frame(self.filter_frame)
         filter_status_frame.pack(fill=tk.X, expand=True)
