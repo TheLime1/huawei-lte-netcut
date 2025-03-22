@@ -28,6 +28,12 @@ class NetcutGUI:
         self.connected_action_buttons = {}  # Store references to block buttons
         self.filtered_action_buttons = {}   # Store references to unblock buttons
         
+        # For annoy tab
+        self.selected_devices = set()  # Store selected devices for annoy feature
+        self.annoy_boxes = {}          # Store device boxes in annoy tab
+        self.annoy_thread = None       # Thread for running annoy sequence
+        self.stop_annoy = False        # Flag to stop annoy sequence
+        
         # Configure style
         self.style = ttk.Style()
         self.style.configure("TButton", padding=6, relief="flat", font=("Helvetica", 10))
@@ -38,13 +44,29 @@ class NetcutGUI:
         self.style.configure("BadgeDisabled.TLabel", background="#f8d7da", foreground="#721c24", padding=5, relief="solid", borderwidth=1)
         self.style.configure("Block.TButton", padding=2, font=("Helvetica", 8))
         self.style.configure("Unblock.TButton", padding=2, font=("Helvetica", 8))
+        self.style.configure("DeviceBox.TFrame", background="#e0e0e0", borderwidth=1, relief="raised")
+        self.style.configure("DeviceBoxSelected.TFrame", background="#ff6b6b", borderwidth=1, relief="raised")
+        self.style.configure("UnblockAll.TButton", padding=8, font=("Helvetica", 12, "bold"), background="#4CAF50", foreground="#ffffff")
         
         self.create_widgets()
         
     def create_widgets(self):
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Create root container with scrollbar
+        root_container = ttk.Frame(self.root)
+        root_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Create canvas with scrollbar for the entire content
+        self.main_canvas = tk.Canvas(root_container)
+        main_scrollbar = ttk.Scrollbar(root_container, orient=tk.VERTICAL, command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=main_scrollbar.set)
+        
+        main_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Main frame inside canvas
+        main_frame = ttk.Frame(self.main_canvas)
+        self.main_canvas.create_window((0, 0), window=main_frame, anchor="nw", tags="main_frame")
+        main_frame.bind("<Configure>", self.on_main_frame_configure)
         
         # Create horizontal container for connection and filter frames
         top_container = ttk.Frame(main_frame)
@@ -94,8 +116,46 @@ class NetcutGUI:
                                            command=self.toggle_filter, state=tk.DISABLED)
         self.toggle_filter_btn.pack(side=tk.RIGHT, pady=5, padx=5)
         
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Devices Tab - Contains both connected and filtered devices
+        self.devices_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.devices_tab, text="Devices")
+        
+        # Annoy Them Tab
+        self.annoy_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.annoy_tab, text="Annoy Them")
+        
+        # Setup content for Devices tab
+        self.setup_devices_tab()
+        
+        # Setup content for Annoy Them tab
+        self.setup_annoy_tab()
+        
+        # Action buttons
+        action_frame = ttk.Frame(main_frame)
+        action_frame.pack(fill=tk.X, pady=10)
+        
+        self.refresh_btn = ttk.Button(action_frame, text="Refresh Devices", command=self.refresh_all, state=tk.DISABLED)
+        self.refresh_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Not connected")
+        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def on_main_frame_configure(self, event):
+        """Update the scroll region when the main frame changes size"""
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        # Set the canvas width to match its container
+        self.main_canvas.itemconfig("main_frame", width=self.main_canvas.winfo_width())
+    
+    def setup_devices_tab(self):
+        """Set up the Devices tab with connected and filtered devices"""
         # Connected Devices frame
-        devices_frame = ttk.LabelFrame(main_frame, text="Connected Devices", padding="10")
+        devices_frame = ttk.LabelFrame(self.devices_tab, text="Connected Devices", padding="10")
         devices_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # Create a horizontal layout for treeview and buttons
@@ -121,10 +181,13 @@ class NetcutGUI:
         self.tree.column("ip", width=120)
         self.tree.column("status", width=80)
         
-        # Add a scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Add scrollbars - vertical and horizontal
+        v_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscroll=v_scrollbar.set, xscroll=h_scrollbar.set)
+        
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.tree.pack(fill=tk.BOTH, expand=True)
         
         # Add a frame for block buttons to the right of the treeview
@@ -132,7 +195,7 @@ class NetcutGUI:
         self.block_buttons_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
         
         # Filtered Devices frame
-        filtered_frame = ttk.LabelFrame(main_frame, text="Filtered/Blocked Devices", padding="10")
+        filtered_frame = ttk.LabelFrame(self.devices_tab, text="Filtered/Blocked Devices", padding="10")
         filtered_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # Create a horizontal layout for filtered treeview and buttons
@@ -156,27 +219,392 @@ class NetcutGUI:
         self.filtered_tree.column("mac", width=150)
         self.filtered_tree.column("filter_type", width=100)
         
-        # Add a scrollbar for filtered devices
-        filtered_scrollbar = ttk.Scrollbar(filtered_tree_frame, orient=tk.VERTICAL, command=self.filtered_tree.yview)
-        self.filtered_tree.configure(yscroll=filtered_scrollbar.set)
-        filtered_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Add scrollbars - vertical and horizontal
+        v_filtered_scrollbar = ttk.Scrollbar(filtered_tree_frame, orient=tk.VERTICAL, command=self.filtered_tree.yview)
+        h_filtered_scrollbar = ttk.Scrollbar(filtered_tree_frame, orient=tk.HORIZONTAL, command=self.filtered_tree.xview)
+        self.filtered_tree.configure(yscroll=v_filtered_scrollbar.set, xscroll=h_filtered_scrollbar.set)
+        
+        v_filtered_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_filtered_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.filtered_tree.pack(fill=tk.BOTH, expand=True)
         
         # Add a frame for unblock buttons to the right of the filtered treeview
         self.unblock_buttons_frame = ttk.Frame(filtered_devices_container, width=100)
         self.unblock_buttons_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+    
+    def setup_annoy_tab(self):
+        """Set up the Annoy Them tab with features for sequential blocking"""
+        # Top part - Horizontal list of connected devices
+        self.devices_list_frame = ttk.LabelFrame(self.annoy_tab, text="Select Devices to Annoy", padding="10")
+        self.devices_list_frame.pack(fill=tk.X, expand=False, pady=5)
         
-        # Action buttons
-        action_frame = ttk.Frame(main_frame)
-        action_frame.pack(fill=tk.X, pady=10)
+        # Scrollable frame for device boxes
+        self.devices_canvas = tk.Canvas(self.devices_list_frame, height=120)
+        scrollbar = ttk.Scrollbar(self.devices_list_frame, orient="horizontal", command=self.devices_canvas.xview)
+        self.devices_canvas.configure(xscrollcommand=scrollbar.set)
         
-        self.refresh_btn = ttk.Button(action_frame, text="Refresh Devices", command=self.refresh_all, state=tk.DISABLED)
-        self.refresh_btn.pack(side=tk.LEFT, padx=5)
+        scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.devices_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
         
-        # Status bar
-        self.status_var = tk.StringVar(value="Not connected")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        # Frame inside canvas for device boxes
+        self.device_boxes_frame = ttk.Frame(self.devices_canvas)
+        self.devices_canvas.create_window((0, 0), window=self.device_boxes_frame, anchor="nw")
+        
+        # Frame for Unblock All button
+        unblock_frame = ttk.Frame(self.annoy_tab)
+        unblock_frame.pack(fill=tk.X, pady=5)
+        
+        # Unblock All button
+        self.unblock_all_btn = ttk.Button(unblock_frame, text="UNBLOCK ALL", 
+                                         command=self.unblock_all_devices,
+                                         style="UnblockAll.TButton", 
+                                         state=tk.DISABLED)
+        self.unblock_all_btn.pack(pady=5)
+        
+        # Paned window to split the bottom part
+        self.annoy_paned = ttk.PanedWindow(self.annoy_tab, orient=tk.HORIZONTAL)
+        self.annoy_paned.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Left side (30%) - Monitoring tables
+        monitor_frame = ttk.Frame(self.annoy_paned)
+        self.annoy_paned.add(monitor_frame, weight=30)
+        
+        # Connected Devices monitoring table
+        connected_monitor_frame = ttk.LabelFrame(monitor_frame, text="Connected Devices")
+        connected_monitor_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        # Treeview with scrollbars for connected devices
+        monitor_connected_frame = ttk.Frame(connected_monitor_frame)
+        monitor_connected_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Simple treeview for connected devices (just names)
+        columns = ("hostname",)
+        self.monitor_connected_tree = ttk.Treeview(monitor_connected_frame, columns=columns, show="headings", selectmode="none")
+        self.monitor_connected_tree.heading("hostname", text="Device Name")
+        
+        # Add scrollbars for the connected monitoring table
+        v_monitor_connected_scrollbar = ttk.Scrollbar(monitor_connected_frame, orient=tk.VERTICAL, command=self.monitor_connected_tree.yview)
+        h_monitor_connected_scrollbar = ttk.Scrollbar(monitor_connected_frame, orient=tk.HORIZONTAL, command=self.monitor_connected_tree.xview)
+        self.monitor_connected_tree.configure(yscroll=v_monitor_connected_scrollbar.set, xscroll=h_monitor_connected_scrollbar.set)
+        
+        v_monitor_connected_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_monitor_connected_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.monitor_connected_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Blocked Devices monitoring table
+        blocked_monitor_frame = ttk.LabelFrame(monitor_frame, text="Blocked Devices")
+        blocked_monitor_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        
+        # Treeview with scrollbars for blocked devices
+        monitor_blocked_frame = ttk.Frame(blocked_monitor_frame)
+        monitor_blocked_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Simple treeview for blocked devices (just names)
+        columns = ("hostname",)
+        self.monitor_blocked_tree = ttk.Treeview(monitor_blocked_frame, columns=columns, show="headings", selectmode="none")
+        self.monitor_blocked_tree.heading("hostname", text="Device Name")
+        
+        # Add scrollbars for the blocked monitoring table
+        v_monitor_blocked_scrollbar = ttk.Scrollbar(monitor_blocked_frame, orient=tk.VERTICAL, command=self.monitor_blocked_tree.yview)
+        h_monitor_blocked_scrollbar = ttk.Scrollbar(monitor_blocked_frame, orient=tk.HORIZONTAL, command=self.monitor_blocked_tree.xview)
+        self.monitor_blocked_tree.configure(yscroll=v_monitor_blocked_scrollbar.set, xscroll=h_monitor_blocked_scrollbar.set)
+        
+        v_monitor_blocked_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_monitor_blocked_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.monitor_blocked_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Right side (70%) - Annoyance methods
+        methods_frame = ttk.Frame(self.annoy_paned)
+        self.annoy_paned.add(methods_frame, weight=70)
+        
+        # Sequential blocking method
+        sequential_frame = ttk.LabelFrame(methods_frame, text="Sequential Blocking")
+        sequential_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Block time configuration
+        time_frame = ttk.Frame(sequential_frame)
+        time_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(time_frame, text="Block time (seconds):").pack(side=tk.LEFT, padx=(10, 5))
+        self.block_time_var = tk.StringVar(value="10")
+        ttk.Entry(time_frame, textvariable=self.block_time_var, width=10).pack(side=tk.LEFT)
+        
+        # Run and stop buttons
+        button_frame = ttk.Frame(sequential_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        self.run_sequential_btn = ttk.Button(button_frame, text="Start Sequential Blocking", 
+                                           command=self.start_sequential_blocking,
+                                           state=tk.DISABLED)
+        self.run_sequential_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_sequential_btn = ttk.Button(button_frame, text="Stop", 
+                                            command=self.stop_sequential_blocking,
+                                            state=tk.DISABLED)
+        self.stop_sequential_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Status of current operation
+        self.annoy_status_frame = ttk.LabelFrame(sequential_frame, text="Status")
+        self.annoy_status_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        self.annoy_status_var = tk.StringVar(value="Not running")
+        self.annoy_status_label = ttk.Label(self.annoy_status_frame, textvariable=self.annoy_status_var, padding=10)
+        self.annoy_status_label.pack(fill=tk.X)
+        
+        # Make the device boxes frame responsive to changes
+        self.device_boxes_frame.bind("<Configure>", self.on_device_frame_configure)
+    
+    def on_device_frame_configure(self, event):
+        """Update the scroll region when the device boxes frame changes size"""
+        self.devices_canvas.configure(scrollregion=self.devices_canvas.bbox("all"))
+    
+    def toggle_device_selection(self, mac, hostname, box_frame):
+        """Toggle selection of a device for annoying"""
+        if mac in self.selected_devices:
+            self.selected_devices.remove(mac)
+            box_frame.configure(style="DeviceBox.TFrame")
+        else:
+            self.selected_devices.add(mac)
+            box_frame.configure(style="DeviceBoxSelected.TFrame")
+        
+        # Enable/disable run button based on selection
+        if self.selected_devices and self.connection:
+            self.run_sequential_btn.configure(state=tk.NORMAL)
+        else:
+            self.run_sequential_btn.configure(state=tk.DISABLED)
+    
+    def start_sequential_blocking(self):
+        """Start the sequential blocking process"""
+        if not self.connection or not self.selected_devices:
+            return
+        
+        try:
+            # Get block time
+            block_time = int(self.block_time_var.get())
+            if block_time <= 0:
+                messagebox.showerror("Error", "Block time must be greater than 0")
+                return
+                
+            # Update UI
+            self.run_sequential_btn.configure(state=tk.DISABLED)
+            self.stop_sequential_btn.configure(state=tk.NORMAL)
+            self.annoy_status_var.set("Starting sequential blocking...")
+            
+            # Reset stop flag
+            self.stop_annoy = False
+            
+            # Start thread
+            self.annoy_thread = threading.Thread(
+                target=self.sequential_blocking_thread,
+                args=(block_time,),
+                daemon=True
+            )
+            self.annoy_thread.start()
+            
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid number for block time")
+            self.annoy_status_var.set("Error: Invalid block time")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start sequential blocking: {str(e)}")
+            self.annoy_status_var.set("Error starting sequential blocking")
+    
+    def sequential_blocking_thread(self, block_time):
+        """Thread function for sequential blocking"""
+        try:
+            # Convert selected devices set to list for indexed access
+            devices_to_annoy = []
+            for mac in self.selected_devices:
+                # Find hostname for this MAC
+                for device_info in self.annoy_boxes.values():
+                    if device_info['mac'] == mac:
+                        devices_to_annoy.append({
+                            'mac': mac,
+                            'hostname': device_info['hostname']
+                        })
+                        break
+            
+            # Main loop - keep going until stopped
+            while not self.stop_annoy and devices_to_annoy:
+                for device in devices_to_annoy:
+                    if self.stop_annoy:
+                        break
+                        
+                    mac = device['mac']
+                    hostname = device['hostname']
+                    
+                    # Update status
+                    self.root.after(0, lambda m=hostname: self.annoy_status_var.set(f"Blocking {m} for {block_time} seconds"))
+                    
+                    # Block device
+                    try:
+                        self.block_device(mac, hostname)
+                        
+                        # Wait for block_time seconds, checking for stop flag periodically
+                        elapsed = 0
+                        while elapsed < block_time and not self.stop_annoy:
+                            time.sleep(0.5)
+                            elapsed += 0.5
+                            # Update status with countdown
+                            remaining = block_time - elapsed
+                            if remaining > 0:
+                                self.root.after(0, lambda m=hostname, r=int(remaining): 
+                                                self.annoy_status_var.set(f"Blocking {m} for {r} more seconds"))
+                        
+                        # Unblock device if we didn't stop
+                        if not self.stop_annoy:
+                            self.unblock_device(mac, hostname)
+                            
+                            # Small pause between devices
+                            for i in range(5):  # 2.5 second pause
+                                if self.stop_annoy:
+                                    break
+                                time.sleep(0.5)
+                    
+                    except Exception as e:
+                        self.root.after(0, lambda e=str(e): self.annoy_status_var.set(f"Error: {e}"))
+            
+            # Update status when done
+            if self.stop_annoy:
+                self.root.after(0, lambda: self.annoy_status_var.set("Sequential blocking stopped"))
+            else:
+                self.root.after(0, lambda: self.annoy_status_var.set("Sequential blocking completed"))
+            
+            # Reset UI
+            self.root.after(0, self.reset_annoy_ui)
+            
+        except Exception as e:
+            self.root.after(0, lambda e=str(e): self.annoy_status_var.set(f"Error: {e}"))
+            self.root.after(0, self.reset_annoy_ui)
+    
+    def stop_sequential_blocking(self):
+        """Stop the sequential blocking process"""
+        self.stop_annoy = True
+        self.annoy_status_var.set("Stopping... (will finish current operation)")
+        self.stop_sequential_btn.configure(state=tk.DISABLED)
+    
+    def reset_annoy_ui(self):
+        """Reset the annoy tab UI after stopping/completing"""
+        self.run_sequential_btn.configure(state=tk.NORMAL if self.selected_devices else tk.DISABLED)
+        self.stop_sequential_btn.configure(state=tk.DISABLED)
+    
+    def unblock_all_devices(self):
+        """Unblock all devices in the blocklist"""
+        if not self.connection:
+            return
+            
+        try:
+            self.status_var.set("Unblocking all devices...")
+            self.root.update_idletasks()
+            
+            # Use an empty list to clear the blacklist
+            response = self.wlan.filter_mac_addresses(
+                mac_list=[],
+                hostname_list=[],
+                filter_status='2'  # '2' for blacklist
+            )
+            
+            # Update UI
+            self.refresh_all()
+            self.status_var.set("All devices unblocked")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to unblock devices: {str(e)}")
+            self.status_var.set("Unblock operation failed")
+    
+    def refresh_annoying_devices(self):
+        """Refresh the list of devices in the Annoy Them tab"""
+        if not self.connection:
+            return
+            
+        try:
+            # Clear existing device boxes
+            for widget in self.device_boxes_frame.winfo_children():
+                widget.destroy()
+            self.annoy_boxes = {}
+            
+            # Get connected devices
+            host_list = self.wlan.host_list()
+            
+            # Clear monitoring tables
+            for item in self.monitor_connected_tree.get_children():
+                self.monitor_connected_tree.delete(item)
+                
+            for item in self.monitor_blocked_tree.get_children():
+                self.monitor_blocked_tree.delete(item)
+            
+            # Get filtered devices for blocked monitoring
+            filtered_devices = self.wlan.get_filtered_devices()
+            blocked_macs = set()
+            blocked_hostnames = {}
+            
+            for filter_info in filtered_devices:
+                if filter_info['filter_type'] == 'blacklist':
+                    for device in filter_info['devices']:
+                        mac = device['mac'].upper()
+                        hostname = device['hostname']
+                        blocked_macs.add(mac)
+                        blocked_hostnames[mac] = hostname
+                        # Add to blocked monitoring table
+                        self.monitor_blocked_tree.insert('', tk.END, values=(hostname,))
+            
+            # Fill device boxes and connected monitoring table with devices
+            if 'Hosts' in host_list and 'Host' in host_list['Hosts']:
+                hosts = host_list['Hosts']['Host']
+                if not isinstance(hosts, list):
+                    hosts = [hosts]
+                
+                for i, host in enumerate(hosts):
+                    mac = host.get('MacAddress', '').upper()
+                    hostname = host.get('HostName', 'Unknown')
+                    
+                    # Add to connected monitoring table
+                    self.monitor_connected_tree.insert('', tk.END, values=(hostname,))
+                    
+                    # Create device box
+                    box_frame = ttk.Frame(self.device_boxes_frame, style="DeviceBox.TFrame", padding=5, width=100, height=80)
+                    box_frame.pack(side=tk.LEFT, padx=5, pady=5)
+                    box_frame.pack_propagate(False)  # Fixed size
+                    
+                    # Set style based on selection status
+                    if mac in self.selected_devices:
+                        box_frame.configure(style="DeviceBoxSelected.TFrame")
+                    
+                    # Device name
+                    ttk.Label(box_frame, text=hostname, wraplength=90, anchor=tk.CENTER).pack(pady=(5,0))
+                    
+                    # Configure click handler
+                    box_frame.bind("<Button-1>", lambda event, m=mac, h=hostname, b=box_frame: 
+                                 self.toggle_device_selection(m, h, b))
+                    
+                    # Store reference to the box and device info
+                    self.annoy_boxes[hostname] = {
+                        'frame': box_frame,
+                        'mac': mac,
+                        'hostname': hostname
+                    }
+            
+            # Update canvas scroll region
+            self.device_boxes_frame.update_idletasks()
+            self.devices_canvas.configure(scrollregion=self.devices_canvas.bbox("all"))
+            
+            # Enable/disable buttons based on connection
+            if self.connection:
+                self.unblock_all_btn.configure(state=tk.NORMAL)
+                if self.selected_devices:
+                    self.run_sequential_btn.configure(state=tk.NORMAL)
+            
+        except Exception as e:
+            self.status_var.set(f"Error refreshing annoy devices: {str(e)}")
+    
+    def refresh_all(self):
+        """Refresh all device lists"""
+        if not self.connection:
+            return
+        
+        self.update_filter_status()
+        self.refresh_connected_devices()
+        self.refresh_filtered_devices()
+        self.refresh_annoying_devices()
     
     def detect_gateway(self):
         """Detect the default gateway and populate the router URL field"""
@@ -254,6 +682,7 @@ class NetcutGUI:
                 self.disconnect_btn.config(state=tk.NORMAL)
                 self.refresh_btn.config(state=tk.NORMAL)
                 self.toggle_filter_btn.config(state=tk.NORMAL)
+                self.unblock_all_btn.config(state=tk.NORMAL)
                 
                 # Start refresh thread
                 self.refresh_thread = threading.Thread(target=self.auto_refresh, daemon=True)
@@ -292,6 +721,12 @@ class NetcutGUI:
             self.disconnect_btn.config(state=tk.DISABLED)
             self.refresh_btn.config(state=tk.DISABLED)
             self.toggle_filter_btn.config(state=tk.DISABLED)
+            self.unblock_all_btn.config(state=tk.DISABLED)
+            self.run_sequential_btn.config(state=tk.DISABLED)
+            self.stop_sequential_btn.config(state=tk.DISABLED)
+            
+            # Stop any running annoy process
+            self.stop_annoy = True
             
             self.filter_status_label.config(text="Not connected", style="Badge.TLabel")
             self.status_var.set("Disconnected")
@@ -335,6 +770,7 @@ class NetcutGUI:
         self.update_filter_status()
         self.refresh_connected_devices()
         self.refresh_filtered_devices()
+        self.refresh_annoying_devices()
     
     def refresh_connected_devices(self):
         """Refresh the list of connected devices"""
